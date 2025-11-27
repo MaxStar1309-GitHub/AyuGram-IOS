@@ -4266,8 +4266,72 @@ func replayFinalState(
                     invalidateGroupStats.insert(Namespaces.PeerGroup.archive)
                 }
             case let .EditMessage(id, message):
+                // ✅ AYUGRAM: Сохранить оригинальное сообщение ПЕРЕД изменением
+                if let settingsManager = AyuGramSettingsManager.sharedInstance {
+                    // Проверяем настройки
+                    let shouldSave = settingsManager.getSettings()
+                        |> take(1)
+                        |> map { $0.saveEditedMessages }
+
+                    let _ = (shouldSave |> take(1)).start(next: { save in
+                        if save {
+                            // Получаем оригинальное сообщение
+                            if let originalMessage = transaction.getMessage(id) {
+                                print("✏️ AYUGRAM: Intercepting edit for message \(id)")
+
+                                // Создаём новый Message из StoreMessage для edited версии
+                                let editedMessage = Message(
+                                    stableId: message.id.id,
+                                    stableVersion: 0,
+                                    id: id,
+                                    globallyUniqueId: message.globallyUniqueId,
+                                    groupingKey: message.groupingKey,
+                                    groupInfo: nil,
+                                    threadId: message.threadId,
+                                    timestamp: message.timestamp,
+                                    flags: MessageFlags(message.flags),
+                                    tags: message.tags,
+                                    globalTags: message.globalTags,
+                                    localTags: message.localTags,
+                                    forwardInfo: nil,
+                                    author: originalMessage.author,
+                                    text: message.text,
+                                    attributes: message.attributes,
+                                    media: message.media,
+                                    peers: originalMessage.peers,
+                                    associatedMessages: SimpleDictionary(),
+                                    associatedMessageIds: [],
+                                    associatedMedia: [:],
+                                    associatedThreadInfo: nil,
+                                    associatedStories: [:]
+                                )
+
+                                // Сохраняем историю изменения
+                                let editedAt = Int32(Date().timeIntervalSince1970)
+                                let editInfo = AyuMessageEditInfo(
+                                    messageId: id,
+                                    editedAt: editedAt,
+                                    originalText: originalMessage.text,
+                                    editedText: message.text,
+                                    originalMedia: originalMessage.media,
+                                    editedMedia: message.media
+                                )
+
+                                // Сохраняем в хранилище
+                                AyuGramMessageHistory.storeMessageEditDirectly(
+                                    editInfo: editInfo,
+                                    transaction: transaction
+                                )
+
+                                print("💾 AYUGRAM: Saved edit history for message \(id)")
+                            }
+                        }
+                    })
+                }
+
                 var generatedEvent: (reactionAuthor: Peer, reaction: MessageReaction.Reaction, message: Message, timestamp: Int32)?
                 transaction.updateMessage(id, update: { previousMessage in
+
                     var updatedFlags = message.flags
                     var updatedLocalTags = message.localTags
                     var updatedAttributes = message.attributes

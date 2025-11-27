@@ -6,6 +6,19 @@ import TelegramApi
 import CryptoUtils
 import EncryptionProvider
 
+extension AyuGramSettingsManager {
+    private static var _sharedInstance: AyuGramSettingsManager?
+
+    public static var sharedInstance: AyuGramSettingsManager? {
+        return _sharedInstance
+    }
+
+    public static func setSharedInstance(_ instance: AyuGramSettingsManager) {
+        _sharedInstance = instance
+    }
+}
+
+
 private let accountRecordToActiveKeychainId = Atomic<[AccountRecordId: Int]>(value: [:])
 
 private func makeExclusiveKeychain(id: AccountRecordId, postbox: Postbox) -> Keychain {
@@ -102,7 +115,13 @@ public class UnauthorizedAccount {
         let updateLoginTokenPipe = self.updateLoginTokenPipe
         let serviceNotificationPipe = self.serviceNotificationPipe
         let masterDatacenterId = Int32(network.mtProto.datacenterId)
-        
+
+        self.ayuSettingsManager = AyuGramSettingsManager(accountManager: accountManager)
+
+            // ✅ AYUGRAM: Установить как глобальный экземпляр
+            AyuGramSettingsManager.setSharedInstance(self.ayuSettingsManager)
+
+
         var updateSentCodeImpl: ((Api.auth.SentCode) -> Void)?
         self.stateManager = UnauthorizedAccountStateManager(
             network: network,
@@ -982,7 +1001,16 @@ public class Account {
     public let network: Network
     public let networkArguments: NetworkInitializationArguments
     public let peerId: PeerId
-    
+
+    public let ayuSettingsManager: AyuGramSettingsManager
+    public let ayuGhostMode: AyuGramGhostMode
+    public let ayuScheduledSender: AyuGramScheduledSender
+    public let ayuMessageHistory: AyuGramMessageHistory
+
+    // ✅ AYUGRAM: Disposable для подписки на удаления
+    private let ayuMessageHistoryDisposable = MetaDisposable()
+
+
     public let auxiliaryMethods: AccountAuxiliaryMethods
     
     private let serviceQueue = Queue()
@@ -1078,7 +1106,17 @@ public class Account {
         self.networkStatsContext = NetworkStatsContext(postbox: postbox)
         
         self.peerInputActivityManager = PeerInputActivityManager()
-        
+
+        // ✅ AYUGRAM: Инициализация менеджеров
+        self.ayuSettingsManager = AyuGramSettingsManager(accountManager: accountManager)
+        self.ayuGhostMode = AyuGramGhostMode(settingsManager: self.ayuSettingsManager)
+        self.ayuScheduledSender = AyuGramScheduledSender(settingsManager: self.ayuSettingsManager)
+        self.ayuMessageHistory = AyuGramMessageHistory(
+            settingsManager: self.ayuSettingsManager,
+            postbox: postbox
+        )
+
+
         if !supplementary {
             self.filteredStorySubscriptionsContext = StorySubscriptionsContext(accountPeerId: peerId, postbox: postbox, network: network, isHidden: false)
             self.hiddenStorySubscriptionsContext = StorySubscriptionsContext(accountPeerId: peerId, postbox: postbox, network: network, isHidden: true)
@@ -1096,7 +1134,17 @@ public class Account {
         self.stateManager = AccountStateManager(accountPeerId: self.peerId, accountManager: accountManager, postbox: self.postbox, network: self.network, callSessionManager: self.callSessionManager, addIsContactUpdates: { [weak self] updates in
             self?.contactSyncManager?.addIsContactUpdates(updates)
         }, shouldKeepOnlinePresence: self.shouldKeepOnlinePresence.get(), peerInputActivityManager: self.peerInputActivityManager, auxiliaryMethods: auxiliaryMethods)
-        
+
+        // ✅ AYUGRAM: Подписка на события удаления сообщений
+        // ВАЖНО: Это должно быть ПОСЛЕ инициализации stateManager
+        self.ayuMessageHistoryDisposable.set(
+            self.ayuMessageHistory.subscribeToDeletedMessages(
+                stateManager: self.stateManager
+            )
+        )
+
+        print("✅ AYUGRAM: Message history observer initialized")
+
         self.viewTracker = AccountViewTracker(account: self)
         self.viewTracker.resetPeerHoleManagement = { [weak self] peerId in
             self?.resetPeerHoleManagement?(peerId)
@@ -1374,6 +1422,8 @@ public class Account {
         self.storageSettingsDisposable?.dispose()
         self.smallLogPostDisposable.dispose()
         self.networkTypeDisposable?.dispose()
+        // ✅ AYUGRAM: Отписка от событий
+        self.ayuMessageHistoryDisposable.dispose()
     }
     
     private func restartConfigurationUpdates() {
